@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,-rpath,/home/cy/onnx_study/my/third_party/onnxruntime-linux-x64-1.24.4/lib CMakeFiles/onnx_infer.dir/onnx_infer.cpp.o -o onnx_infer  -Wl,-rpath,/home/cy/onnx_study/my/third_party/onnxruntime-linux-x64-1.24.4/lib /home/cy/onnx_study/my/third_party/onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so 

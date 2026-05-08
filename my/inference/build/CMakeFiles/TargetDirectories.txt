@@ -1,0 +1,4 @@
+/home/cy/onnx_study/my/inference/build/CMakeFiles/onnx_infer.dir
+/home/cy/onnx_study/my/inference/build/CMakeFiles/imu_change_infer.dir
+/home/cy/onnx_study/my/inference/build/CMakeFiles/edit_cache.dir
+/home/cy/onnx_study/my/inference/build/CMakeFiles/rebuild_cache.dir
