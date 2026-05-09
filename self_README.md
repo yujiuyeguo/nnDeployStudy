@@ -791,3 +791,35 @@ joint_pos 用的是 mdp.joint_pos_rel，所以它不是绝对关节角，而是�
 joint_vel 用的是 mdp.joint_vel_rel，这里默认速度一般是 0，所以通常就是当前关节速度，定义在 observations.py (line 257)
 
 actions 用的是 mdp.last_action，就是上一步 policy 输出的 8 维动作，定义在 observations.py (line 657)
+
+
+
+# onnx 模型创建
+1. 核心对象的创建
+
+    if (!ctx) ctx = std::make_unique<ModelContext>(); (准备容器)
+
+    Ort::SessionOptions session_options; (即便不加优化项，也必须传一个空的配置对象)
+
+    ctx->session = std::make_unique<Ort::Session>(...); (将 .onnx 文件载入内存，这是最核心的一步)
+
+2. 获取输入输出元数据 (Metadata)
+模型像一个黑盒，你必须知道它有几个入口、几个出口、叫什么名字、需要什么形状的数据。
+
+    GetInputCount() / GetOutputCount() (获取节点数量)
+
+    GetInputNameAllocated() / GetOutputNameAllocated() (获取节点名称)
+
+    GetInputTypeInfo()....GetShape() (获取维度，比如 [1, 3, 224, 224])
+
+3. 名称指针的格式转换
+
+    ctx->input_names_raw 和 output_names_raw 的组装。
+
+        原因： ONNX Runtime 的底层是 C API，它的 Run 函数只认 const char* const* 这种老式的 C 指针数组，不认现代的 std::string。这一步的转换是 API 强制要求的。
+
+4. 内存位置声明
+
+    Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU)
+
+        原因： ORT 需要知道你的数据是放在 CPU 内存还是 GPU 显存里，否则它不知道去哪里取数据。

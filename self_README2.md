@@ -1,45 +1,3 @@
-# 提前绑定 Buffer (零拷贝优化)
-
-    ctx->input_tensor = std::make_unique<Ort::Value>(...); (包括 output_tensor)
-
-        作用： 这是极其关键的架构优化。很多新手会在每次执行 Run() 时临时创建 Tensor，这极其消耗性能。这里在 setup_model 阶段就把 Tensor 和预先分配好的 buffer.data() 死死绑定在一起。
-
-        效果： 之后每次推理，只需要往 input_buffer 里填数字，模型就会直接读取；模型算完，结果直接出现在 output_buffer 里。实现了“零拷贝 (Zero-copy)”。
-
-
-
-
-# onnx 模型创建
-1. 核心对象的创建
-
-    if (!ctx) ctx = std::make_unique<ModelContext>(); (准备容器)
-
-    Ort::SessionOptions session_options; (即便不加优化项，也必须传一个空的配置对象)
-
-    ctx->session = std::make_unique<Ort::Session>(...); (将 .onnx 文件载入内存，这是最核心的一步)
-
-2. 获取输入输出元数据 (Metadata)
-模型像一个黑盒，你必须知道它有几个入口、几个出口、叫什么名字、需要什么形状的数据。
-
-    GetInputCount() / GetOutputCount() (获取节点数量)
-
-    GetInputNameAllocated() / GetOutputNameAllocated() (获取节点名称)
-
-    GetInputTypeInfo()....GetShape() (获取维度，比如 [1, 3, 224, 224])
-
-3. 名称指针的格式转换
-
-    ctx->input_names_raw 和 output_names_raw 的组装。
-
-        原因： ONNX Runtime 的底层是 C API，它的 Run 函数只认 const char* const* 这种老式的 C 指针数组，不认现代的 std::string。这一步的转换是 API 强制要求的。
-
-4. 内存位置声明
-
-    Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU)
-
-        原因： ORT 需要知道你的数据是放在 CPU 内存还是 GPU 显存里，否则它不知道去哪里取数据。
-
-
 # 框架学习
 
 1：内存锁定
@@ -68,6 +26,8 @@ pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp)
     设置调度策略为 SCHED_FIFO（先进先出实时调度），优先级 50
 
     这是为了保证控制循环的确定性时延，失败会直接终止程序
+
+
 
 3：创建推理节点并运行
 node = std::make_shared<InferenceNode>();
@@ -471,6 +431,7 @@ main 线程：负责 ROS 事件和系统协调，不能太慢
 
 
 # InferenceNode 是一个 ROS 2 的“逻辑节点”，负责挂订阅、发布、服务；但它默认不会自动给你提供一个“严格按固定周期跑、可设实时优先级”的控制循环线程。
+
 所以作者才在节点内部自己开了一个真正的 OS 线程，专门跑 inference()。
 
 你可以把两者分开看：
@@ -479,33 +440,31 @@ Node：ROS 里的通信容器
 thread：Linux 里的执行载体
 这份代码里为什么要自己建 inference 线程，核心有 3 个原因。
 
+    把“通信”和“控制”解耦
+            这个程序实际上分成三类执行流：
 
+            main 线程：跑 ROS executor，处理订阅/服务
+            inference 线程：定期算策略
+            control 线程：更高频地下发动作
 
+            这样做的好处是：
 
-3. 把“通信”和“控制”解耦
-这个程序实际上分成三类执行流：
+            手柄消息、service 回调不会直接卡住推理循环
+            推理耗时波动不会直接堵塞 ROS 通信
+            控制下发还能比推理更高频
+            这就是典型的“通信层”和“实时控制层”分离。
 
-main 线程：跑 ROS executor，处理订阅/服务
-inference 线程：定期算策略
-control 线程：更高频地下发动作
-这样做的好处是：
+            如果不单独建这个线程，会怎样？
 
-手柄消息、service 回调不会直接卡住推理循环
-推理耗时波动不会直接堵塞 ROS 通信
-控制下发还能比推理更高频
-这就是典型的“通信层”和“实时控制层”分离。
-
-如果不单独建这个线程，会怎样？
-
-可以写成 ROS timer 版本，程序也能跑
-但推理触发会更依赖 executor 调度
-当回调多、系统忙、ONNX 推理偶尔变慢时，周期抖动会更明显
-机器人控制里这种抖动通常是不希望看到的
-所以节点里再开线程，不是重复造轮子，而是因为：
+            可以写成 ROS timer 版本，程序也能跑
+            但推理触发会更依赖 executor 调度
+            当回调多、系统忙、ONNX 推理偶尔变慢时，周期抖动会更明显
+            机器人控制里这种抖动通常是不希望看到的
+            所以节点里再开线程，不是重复造轮子，而是因为：
 
 ROS 节点负责组织系统，真实的高频实时任务还是要用独立线程自己掌控。
 
-一句话概括：
+
 
 创建 inference 线程，是为了让“策略推理”脱离普通 ROS 回调调度，变成一个可控的、固定周期的、可设实时优先级的执行循环。
 
@@ -513,23 +472,17 @@ ROS 节点负责组织系统，真实的高频实时任务还是要用独立线�
 
 
 
-# 一般 ROS 节点是什么情况
+# ROS 节点是什么情况 , ros 是框架
 
-普通 ROS 节点通常是这样：
+1. 普通 ROS 节点通常是这样：
 
-创建一个 Node
-注册订阅、发布、service、timer
-调 spin(node)
+创建一个 Node -> 注册订阅、发布、service、timer -> 调 spin(node)
 之后程序就进入一个“等事件、派发回调”的循环。
 
 比如：
-
 订阅到消息了，执行 callback
 timer 到点了，执行 callback
 service 请求来了，执行 callback
-
-
-
 
 spin() 是循环，但它是“等 ROS 事件的循环”；
 是任务调度期的循环，有阻塞；
@@ -538,15 +491,11 @@ ROS2的逻辑是这样的， 创建节点的时候，会把节点里面的东西
 然后就是调度器的循环了，靠 ROS executor 帮你调度线程执行回调，回调。
 
 
-inference()线程 是“按固定周期执行控制逻辑的循环”。
-
-
-ros 只是个框架
+2. inference()线程 是“按固定周期执行控制逻辑的循环”。
 
 
 # 所以ros2control 和 ros2 节点的关系 ？
 ros2control 自带了一个线程，通过 ros2control
-
 
 
 ROS 事件处理 和 实时控制循环 被刻意拆开了
@@ -1109,10 +1058,7 @@ ros2_control 通常只有一个统一控制循环，但你现在这份代码其�
 
 # 更好的方案
 # 这种方案是很靠谱的，而且比“在 update() 里按 decimation 直接跑 ONNX”更适合真机。
-
-核心价值就一句话：
-
-把慢的、不确定时延的推理，从实时控制循环里彻底拿出去。
+# 核心价值就一句话： 把慢的、不确定时延的推理，从实时控制循环里彻底拿出去。
 
 这样 ros2_control 的 update() 就只做：
 
@@ -1305,3 +1251,380 @@ RealtimeBuffer<ActType> act_buffer_
     作为第一步验证，写个 if (cycle_count % 20 == 0) 完全站得住脚。
 
     在机器人上高动态运行前，把这个模式演进为异步推理 + RealtimeBuffer，就是 ros2_control 下 RL 控制器的最正确形态。
+
+
+# 代码框架
+ATOM1 
+
+main()
+  ↓
+rclcpp::init()
+  ↓
+设置 main 线程实时优先级
+  ↓
+创建 InferenceNode
+  ↓
+InferenceNode() 构造函数内：
+  1. load_config()
+  2. 创建 RobotInterface
+  3. 创建 ONNX Runtime Env
+  4. setup_model() 加载模型
+  5. 初始化 obs_ / act_ / joint buffers
+  6. 创建 publishers / subscriptions / services
+  7. 启动 inference_thread_
+  8. 启动 control_thread_
+  ↓
+executor.add_node(node)
+  ↓
+executor.spin()
+
+
+# main TR
+
+executor.spin()
+  ↓
+收到 /joy
+  -> subs_joy_callback()
+  -> 更新 cmd_vel_ / is_running_ / 模式状态 / init motors 等
+
+收到 /cmd_vel
+  -> subs_cmd_callback()
+  -> 更新 cmd_vel_
+
+收到 /joint_ref_states
+  -> subs_joint_state_callback()
+  -> 更新 interrupt_action_
+
+收到 service 请求
+  -> init_motors_srv() / start_inference_srv() / ...
+  -> 调 robot_ 或修改状态位
+
+
+# inference TR
+
+InferenceNode::inference()
+  ↓
+设置线程名 + 实时优先级
+  ↓
+计算 period = dt * decimation
+  ↓
+while (rclcpp::ok()):
+
+  if !is_running_:
+    sleep(period)
+    continue
+
+  1. 如果 beyondmimic 开启：
+       从 motion loader 取 motion_pos / motion_vel
+       写入 obs_
+
+  2. read_imu()
+       -> robot_->get_ang_vel()
+       -> robot_->get_quat()
+
+  3. 把 IMU 角速度、重力方向写入 obs_
+
+  4. publish_imu()
+
+  5. 读取 cmd_vel_
+       -> 写入 obs_
+
+  6. read_joints()
+       -> robot_->get_joint_q()
+       -> robot_->get_joint_vel()
+       -> robot_->get_joint_tau()
+
+  7. 把 joint pos / vel 写入 obs_
+
+  8. 检查 joint_limits
+       超限则 shutdown
+
+  9. publish_joint_states()
+
+  10. 把上一拍动作 active_ctx_->output_buffer 写入 obs_
+
+  11. 如果 interrupt 模式开：
+        再附加 interrupt 标记
+
+  12. clip obs
+
+  13. frame stack
+        首帧: 填满整个 input_buffer
+        非首帧: 左移历史帧 + 追加当前 obs
+
+  14. 如果 use_attn_enc_:
+        把 perception_obs_ 拼到 input_buffer 后面
+
+  15. active_ctx_->session->Run(...)
+        -> ONNX 推理
+
+  16. 读取 output_buffer
+        -> clip actions
+        -> usd2urdf 映射
+        -> action_scale
+        -> 加 joint_default_angle
+        -> 写入 act_
+
+  17. 如果 interrupt 模式开：
+        用 interrupt_action_ 覆盖部分关节
+
+  18. publish_action()
+
+  19. sleep 到下一个周期
+
+
+# control 线程代码流程
+InferenceNode::control()
+  ↓
+设置线程名 + 实时优先级
+  ↓
+计算 period = dt
+  ↓
+while (rclcpp::ok()):
+
+  1. apply_action()
+       if !is_running_ or !robot_->is_init_:
+           return
+
+       加锁 act_mutex_
+       last_act_ = act_alpha * act_ + (1 - act_alpha) * last_act_
+       解锁
+
+       robot_->apply_action(last_act_)
+
+  2. sleep 到下一个周期
+
+RobotInterface::apply_action() 的代码流程
+
+robot_->apply_action(action)
+  ↓
+1. 读取各电机反馈
+   -> position / velocity / current
+
+2. 写回 joint_q_ / joint_vel_ / joint_tau_
+
+3. 如果有闭链关节
+   -> 做 forward decouple / 变换
+
+4. 根据 action + kp/kd 生成目标控制量
+
+5. 再做一次 close-chain decouple（如果需要）
+
+6. 把 URDF 关节命令映射回 motor_target_
+
+7. 并行对每个电机发送 MIT/CAN 命令
+
+
+原版完整代码流程图
+
+ROS topic/service
+  ↓
+main 线程回调
+  ↓
+更新共享变量(cmd_vel_ / is_running_ / interrupt_action_)
+  ↓
+inference 线程
+  ↓
+读 IMU + 读关节 + 拼 observation
+  ↓
+ONNX 推理
+  ↓
+act_
+  ↓
+control 线程
+  ↓
+平滑 last_act_
+  ↓
+RobotInterface::apply_action()
+  ↓
+电机命令下发
+
+
+# 迁移后的框架
+
+ros2_control 启动
+  ↓
+加载 robot description / ros2_control 配置
+  ↓
+创建 controller_manager
+  ↓
+加载 AtomHardwareInterface
+  ↓
+加载 RLLocomotionController
+  ↓
+controller.on_init()
+  ↓
+controller.on_configure()
+    1. 加载 ONNX 模型
+    2. 初始化 obs_buffer_ / act_buffer_
+    3. 启动 inference_thread_
+  ↓
+controller.on_activate()
+  ↓
+controller_manager 进入 update loop
+
+
+# controller_manager 高频主循环代码流程
+while (running):
+  1. hardware.read()
+  2. controller.update()
+  3. hardware.write()
+# hardware.read() 流程
+
+AtomHardwareInterface::read()
+  ↓
+读取各电机状态
+  -> pos / vel / effort
+  ↓
+读取 IMU 状态
+  -> quat / ang_vel
+  ↓
+写入 state interfaces
+
+# controller.update() 流程
+
+这是 RT 路径，只做轻量逻辑
+RLLocomotionController::update()
+  ↓
+1. 从 state interfaces 读最新状态
+   -> joint pos / vel / effort
+   -> imu quat / ang_vel
+
+2. 拼当前 observation
+   -> 关节状态
+   -> imu
+   -> cmd_vel
+   -> interrupt / perception / 其他模式输入
+
+3. obs_buffer_.writeFromRT(obs)
+   -> 非阻塞把最新 obs 给推理线程
+
+4. latest_act = act_buffer_.readFromRT()
+   -> 非阻塞读最新动作
+
+5. if latest_act 有值:
+      应用 latest_act
+   else:
+      用 last_act_ 零阶保持
+
+6. 做必要的限幅 / 平滑 / 安全检查
+
+7. 写 command interfaces
+
+
+不在 update() 里直接跑 ONNX
+只负责“把最新 observation 发出去、把最新 action 拿回来”
+
+# 异步 inference_thread_ 流程
+
+inference_thread_
+  ↓
+while (inference_running_):
+
+  1. latest_obs = obs_buffer_.readFromNonRT()
+     或者取一份最新 observation 快照
+
+  2. 如果 observation 可用:
+       做 frame stack
+       拼模型输入
+       调 onnx_inference()
+
+  3. 得到 act
+
+  4. act_buffer_.writeFromNonRT(act)
+
+  5. sleep_until_next_inference_period()
+
+总结：obs_buffer_ -> ONNX -> act_buffer_
+
+# hardware.write() 流程
+
+AtomHardwareInterface::write()
+  ↓
+从 command interfaces 读取各关节目标
+  ↓
+做映射 / 闭链解耦 / kp-kd 处理
+  ↓
+生成 motor command
+  ↓
+下发到 CAN 电机
+
+# 新版完整代码流程图
+
+高频 RT 主链:
+controller_manager
+  ↓
+hardware.read()
+  ↓
+state interfaces
+  ↓
+controller.update()
+  ├─ 组 obs
+  ├─ obs_buffer_ <- 最新 observation
+  ├─ act_buffer_ -> 取最新 action
+  └─ 写 command interfaces
+  ↓
+hardware.write()
+  ↓
+电机命令下发
+
+
+
+# 两套代码流程直接对照
+# 原版
+
+main线程
+  -> ROS回调改状态
+
+inference线程
+  -> 读状态 + 跑ONNX + 产出 act_
+
+control线程
+  -> 读 act_ + 下发到 RobotInterface
+
+
+# ros2_control 版
+
+controller_manager.update loop
+  -> read() + update() + write()
+
+inference_thread_
+  -> 从 obs_buffer 取状态 + 跑ONNX + 写 act_buffer
+
+
+
+
+迁移时你最该记住的“替换关系”
+# 旧代码里的 inference()
+
+不再直接控制硬件
+迁移后只保留“推理核心”
+放到异步 inference_thread
+
+
+
+
+
+# 旧代码里的 control()
+
+不再保留原样线程
+迁移后被 controller_manager 高频主循环取代
+旧代码里的 RobotInterface
+
+拆成：
+HardwareInterface::read()
+HardwareInterface::write()
+
+
+# 旧代码里的共享变量 act_
+换成 RealtimeBuffer<ActType>
+旧代码里的关节/IMU即时读取
+
+换成从 state interfaces 取
+
+
+# 先在有几个问题
+
+1：异步线程如何实现
+2：action 如何部署
+3：obs如何组
