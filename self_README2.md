@@ -1058,7 +1058,10 @@ ros2_control 通常只有一个统一控制循环，但你现在这份代码其�
 
 # 更好的方案
 # 这种方案是很靠谱的，而且比“在 update() 里按 decimation 直接跑 ONNX”更适合真机。
-# 核心价值就一句话： 把慢的、不确定时延的推理，从实时控制循环里彻底拿出去。
+
+核心价值就一句话：
+
+把慢的、不确定时延的推理，从实时控制循环里彻底拿出去。
 
 这样 ros2_control 的 update() 就只做：
 
@@ -1440,6 +1443,10 @@ RobotInterface::apply_action()
 电机命令下发
 
 
+
+
+
+
 # 迁移后的框架
 
 ros2_control 启动
@@ -1628,3 +1635,60 @@ HardwareInterface::write()
 1：异步线程如何实现
 2：action 如何部署
 3：obs如何组
+
+
+
+# 最核心的区别
+普通模式：
+用 cmd_vel 告诉机器人“往哪走”
+
+interrupt 模式：
+还是走普通 locomotion，但允许外部接管一部分关节
+
+beyondmimic 模式：
+不再主要靠 cmd_vel 驱动
+而是给策略一个“参考动作轨迹”，让它边模仿边稳定执行
+
+
+
+一句话压缩
+这三种模式可以记成：
+
+普通：状态 + 速度命令
+interrupt：普通 + 中断标志 + 局部动作覆盖
+beyondmimic：状态 + 参考动作轨迹，切另一套 motion policy
+
+
+# 三个模式的obs
+
+普通模式
+
+[ imu_ang_vel ]
+[ gravity_b   ]
+[ cmd_vel     ]
+[ joint_pos   ]
+[ joint_vel   ]
+[ last_action ]
+
+
+interrupt 模式
+[ imu_ang_vel ]
+[ gravity_b   ]
+[ cmd_vel     ]
+[ joint_pos   ]
+[ joint_vel   ]
+[ last_action ]
+[ interrupt_flag ]
+
+
+beyondmimic 模式
+[ motion_pos  ]
+[ motion_vel  ]
+[ imu_ang_vel ]
+[ gravity_b   ]
+[ joint_pos   ]
+[ joint_vel   ]
+[ last_action ]
+
+
+
